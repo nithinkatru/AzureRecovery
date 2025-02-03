@@ -1,9 +1,113 @@
 trigger:
-- main  # Runs the pipeline when code is pushed to the main branch
+- main  # Runs pipeline when code is pushed to main branch
 
 pool:
-  name: MySelfHostedPool 
+  name: MySelfHostedPool  # Use your agent pool
+
+variables:
+  ResourceGroup: 'RG-DR-WestUS'
+  VaultName: 'MyRecoveryVaultWest'
+  VMName: 'MyVM'
 
 steps:
-- script: echo "Hello, Azure DevOps Pipeline has been successfully executed!"
-  displayName: "Print Success Message"
+### 1️⃣ Authenticate to Azure ###
+- task: AzurePowerShell@5
+  displayName: 'Authenticate to Azure'
+  inputs:
+    azureSubscription: 'MyAzureServiceConnection'  
+    ScriptType: 'InlineScript'
+    Inline: |
+      Write-Host "Logging into Azure..."
+    azurePowerShellVersion: 'Latest'
+
+### 2️⃣ Retrieve the Recovery Vault ###
+- task: PowerShell@2
+  displayName: 'Retrieve Recovery Vault'
+  inputs:
+    targetType: 'inline'
+    script: |
+      $vault = Get-AzRecoveryServicesVault -ResourceGroupName $(ResourceGroup) -Name $(VaultName)
+      if (-not $vault) {
+          Write-Host "ERROR: Vault '$(VaultName)' not found."
+          exit 1
+      }
+      Write-Host "Vault Found: $($vault.Name)"
+
+### 3️⃣ Get the Recovery Fabrics ###
+- task: PowerShell@2
+  displayName: 'Retrieve Recovery Fabric'
+  inputs:
+    targetType: 'inline'
+    script: |
+      $fabric = Get-AzRecoveryServicesAsrFabric | Where-Object { $_.Name -like "*westus*" }
+      if (-not $fabric) {
+          Write-Host "ERROR: No suitable recovery fabric found."
+          exit 1
+      }
+      Write-Host "Fabric Found: $($fabric.Name)"
+
+### 4️⃣ Get the Protection Container ###
+- task: PowerShell@2
+  displayName: 'Retrieve Protection Container'
+  inputs:
+    targetType: 'inline'
+    script: |
+      $container = Get-AzRecoveryServicesAsrProtectionContainer -Fabric $fabric
+      if (-not $container) {
+          Write-Host "ERROR: No protection container found."
+          exit 1
+      }
+      Write-Host "Protection Container Found: $($container.Name)"
+
+### 5️⃣ Get the Replicated VM ###
+- task: PowerShell@2
+  displayName: 'Retrieve Replicated VM'
+  inputs:
+    targetType: 'inline'
+    script: |
+      $replicatedVM = Get-AzRecoveryServicesAsrReplicationProtectedItem -ProtectionContainer $container | Where-Object { $_.FriendlyName -eq "$(VMName)" }
+      if (-not $replicatedVM) {
+          Write-Host "ERROR: Replicated VM '$(VMName)' not found."
+          exit 1
+      }
+      Write-Host "Replicated VM Found: $($replicatedVM.FriendlyName)"
+
+### 6️⃣ Start Test Failover ###
+- task: PowerShell@2
+  displayName: 'Start Test Failover'
+  inputs:
+    targetType: 'inline'
+    script: |
+      $job = Start-AzRecoveryServicesAsrTestFailoverJob -ReplicationProtectedItem $replicatedVM -FailoverDirection "PrimaryToRecovery"
+      Write-Host "Test Failover Job Started: $($job.Name)"
+
+### 7️⃣ Monitor the Failover Process ###
+- task: PowerShell@2
+  displayName: 'Monitor Failover Job'
+  inputs:
+    targetType: 'inline'
+    script: |
+      while ($true) {
+          $currentJob = Get-AzRecoveryServicesAsrJob -Name $job.Name
+          if ($currentJob.State -eq "InProgress" -or $currentJob.State -eq "NotStarted") {
+              Write-Host "Job status: $($currentJob.State). Waiting 30 seconds..."
+              Start-Sleep -Seconds 30
+          } else {
+              Write-Host "Job Finished with Status: $($currentJob.State)"
+              break
+          }
+      }
+      if ($currentJob.State -ne "Succeeded") {
+          Write-Host "Test Failover job failed or partially succeeded. Check logs."
+          exit 1
+      }
+      Write-Host "Test Failover successful!"
+
+### 8️⃣ Cleanup the Test Failover ###
+- task: PowerShell@2
+  displayName: 'Cleanup Test Failover'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Stop-AzRecoveryServicesAsrTestFailoverJob -ReplicationProtectedItem $replicatedVM
+      Write-Host "Test Failover Cleanup Completed."
