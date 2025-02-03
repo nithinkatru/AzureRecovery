@@ -2,7 +2,7 @@ trigger:
 - main  # Runs the pipeline when code is pushed to the main branch
 
 pool:
-  vmImage: 'ubuntu-latest'  # Uses a Microsoft-hosted agent
+  name: MySelfHostedPool 
 
 steps:
 - script: echo "Hello, Azure DevOps Pipeline has been successfully executed!"
